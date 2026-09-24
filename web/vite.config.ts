@@ -35,6 +35,7 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,webmanifest}'],
         globIgnores: ['data/**'],
+        importScripts: ['push-sw.js'], // rain alert notifications
         navigateFallbackDenylist: [/\/data\//],
         runtimeCaching: [
           {

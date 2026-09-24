@@ -26,6 +26,14 @@ export function toggleSaved(s: Spot) {
   savePlaces(list);
 }
 
+/** Turn rain alerts for a saved place on or off. */
+export function setPlaceAlert(i: number, on: boolean) {
+  const list = loadPlaces();
+  if (!list[i]) return;
+  list[i].alert = on;
+  savePlaces(list);
+}
+
 export function removePlace(i: number) {
   const list = loadPlaces();
   list.splice(i, 1);

@@ -1,9 +1,9 @@
-# Every 6 hours: fetch the newest ECMWF + GFS runs, rebuild the app, publish to GitHub Pages.
+# Every 6 hours: fetch the newest ECMWF run, rebuild the app, publish to GitHub Pages.
 name: อัปเดตพยากรณ์
 
 on:
   schedule:
-    # UTC. 08:20 and 20:20 catch the new ECMWF 00z/12z runs; 02:20 and 14:20 catch GFS.
+    # UTC. 08:20 and 20:20 catch the new ECMWF 00z/12z runs; 02:20 and 14:20 pick up late ones.
     - cron: '20 2,8,14,20 * * *'
   workflow_dispatch:
   push:

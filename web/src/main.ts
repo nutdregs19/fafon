@@ -10,8 +10,10 @@ import { Timeline } from './timeline/timeline';
 import { Satellite } from './satellite/satellite';
 import { Nowcast } from './satellite/nowcast';
 import { Sheet, type Spot } from './sheet/sheet';
-import { gps, isSaved, loadPlaces, placeName, removePlace, toggleSaved } from './places/places';
+import { gps, isSaved, loadPlaces, placeName, removePlace, setPlaceAlert, toggleSaved } from './places/places';
 import { HOUR, hourLabel } from './util/time';
+import { RainBanner } from './alert/banner';
+import * as rainPush from './alert/push';
 
 setWorkerUrl(workerUrl);
 
@@ -31,7 +33,7 @@ const LAYERS: { key: LayerKey; label: string; icon: string }[] = [
 let layer = (pref.get('layer') as LayerKey) || 'rain';
 let manifest: Manifest;
 let stores: Record<string, FrameStore> = {};
-let sourceKey = pref.get('source') || 'ecmwf';
+let sourceKey = 'ecmwf';
 let field: FieldLayer;
 let particles: Particles;
 let sat: Satellite;
@@ -42,6 +44,9 @@ let nowT = Date.now();
 let picked: Spot | null = null;
 let pickerMarker: Marker | null = null;
 let gpsMarker: Marker | null = null;
+let here: Spot | null = null; // last GPS fix, for the alert strip and phone alerts
+const banner = new RainBanner($('#rain-alert'));
+banner.onTap = (s) => { map.flyTo({ center: [s.lon, s.lat], zoom: Math.max(map.getZoom(), 6) }); pick({ ...s }, true); };
 let lastDraw = { t: NaN, layer: '', source: '' };
 
 function toast(msg: string, ms = 3000) {
@@ -102,12 +107,11 @@ map.once('style.load', async () => {
   sheet.onSave = (s) => { toggleSaved(s); renderPlacesMenu(); toast(isSaved(s) ? 'บันทึกเป็นที่ประจำแล้ว' : 'เอาออกจากที่ประจำแล้ว'); };
 
   buildLayerButtons();
-  buildSourceToggle();
   timeline = new Timeline($('#timeline'), nowT - 12 * HOUR, nowT, lastFrameTime());
   timeline.tag = (t) => {
     const nc = nowcastFade(t);
     if (nc !== null) return nc === 1 ? 'ทำนายจากเรดาร์ (ระยะสั้น)' : 'ทำนายจากเรดาร์ → พยากรณ์';
-    if (t >= nowT) return `พยากรณ์ · ${manifest.sources[sourceKey].label}`;
+    if (t >= nowT) return 'พยากรณ์';
     const r = sat.radarFor(t);
     if (r === null) return `ภาพดาวเทียมจริง · ถ่ายเมื่อ ${hourLabel(sat.frameFor(t))}`;
     return layer === 'rain' ? `เรดาร์ฝนจริง · ${hourLabel(r)}` : `ดาวเทียม + เรดาร์ฝน · ${hourLabel(r)}`;
@@ -193,15 +197,12 @@ function lastFrameTime() {
 
 function useSource(key: string) {
   sourceKey = key;
-  pref.set('source', key);
   if (!stores[key]) {
     stores[key] = new FrameStore(manifest, manifest.sources[key]);
     stores[key].onLoaded = () => scheduleRender();
   }
   stores[key].prefetch(Math.max(timeline.t, nowT));
   timeline.setRange(nowT - 12 * HOUR, nowT, lastFrameTime());
-  document.querySelectorAll<HTMLButtonElement>('#source-toggle button').forEach((b) =>
-    b.classList.toggle('on', b.dataset.key === key));
   sheet.setSource(key);
   scheduleRender(true);
 }
@@ -295,15 +296,6 @@ function buildLayerButtons() {
   });
 }
 
-function buildSourceToggle() {
-  const el = $('#source-toggle');
-  el.innerHTML = Object.values(manifest.sources).map((s) =>
-    `<button role="tab" data-key="${s.key}">${s.label}</button>`).join('');
-  el.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
-    b.onclick = () => { if (b.dataset.key !== sourceKey) { useSource(b.dataset.key!); toast(`เปลี่ยนเป็นพยากรณ์${manifest.sources[sourceKey].label} (${manifest.sources[sourceKey].credit})`); } };
-  });
-}
-
 let legendKey = '';
 function updateLegend(past: boolean) {
   const radar = past && sat.mode === 'radar';
@@ -384,24 +376,125 @@ async function locate(initial: boolean) {
     gpsMarker.setLngLat([s.lon, s.lat]).addTo(map);
     map.flyTo({ center: [s.lon, s.lat], zoom: Math.max(map.getZoom(), 5.5), duration: initial ? 1200 : 800 });
     pick(s, !initial);
+    here = { ...s };
+    banner.watch(here);
     // don't write a name onto `s` here — leave it unset so openSpot()'s own lookup
     // (triggered by pick when !initial) resolves and syncs the sheet's title itself
     const name = await placeName(s);
     $('#place-name').textContent = name ?? 'ตำแหน่งของฉัน';
+    if (name && here) here.name = name;
+    syncAlerts();
   } catch {
     const saved = loadPlaces()[0];
     $('#place-name').textContent = saved?.name ?? 'แตะแผนที่เพื่อดูพยากรณ์';
     if (saved && initial) { map.jumpTo({ center: [saved.lon, saved.lat], zoom: 5.5 }); pick(saved, false); }
     else if (!initial) toast('เปิดตำแหน่งไม่ได้ — อนุญาตให้เข้าถึงตำแหน่งในการตั้งค่าเครื่อง', 5000);
+    if (!here && saved) banner.watch(saved);
   }
+}
+
+// ---------- rain alerts on the phone ----------
+
+const placeId = (p: Spot) => `p${p.lat.toFixed(2)}_${p.lon.toFixed(2)}`;
+function alertSpots(): rainPush.AlertSpot[] {
+  const out: rainPush.AlertSpot[] = here ? [rainPush.gpsSpot(here)] : [];
+  for (const p of loadPlaces()) if (p.alert) out.push({ id: placeId(p), lat: p.lat, lon: p.lon, name: p.name });
+  return out;
+}
+const syncAlerts = () => { rainPush.sync(alertSpots()).catch(() => {}); };
+
+// coming back to the app: take a fresh GPS fix quietly (no map jump) so the strip and the
+// server follow you around
+let lastFix = Date.now();
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden || Date.now() - lastFix < 5 * 60_000) return;
+  lastFix = Date.now();
+  try {
+    const s = await gps();
+    gpsMarker?.setLngLat([s.lon, s.lat]);
+    const same = here && Math.abs(here.lat - s.lat) < 0.02 && Math.abs(here.lon - s.lon) < 0.02;
+    here = { ...s, name: same ? here!.name : undefined };
+    banner.watch(here);
+    if (!here.name) { const n = await placeName(s); if (n && here) here.name = n; }
+    syncAlerts();
+  } catch { /* keep the last one */ }
+});
+
+const BELL = '<svg viewBox="0 0 24 24" class="ic"><path d="M6 16.5V11a6 6 0 1 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg>';
+
+async function renderAlertSection() {
+  const box = document.querySelector<HTMLElement>('#places-menu .alerts');
+  if (!box) return;
+  if (!rainPush.serverReady()) { box.hidden = true; return; }
+  const on = await rainPush.isOn();
+  box.innerHTML = on
+    ? `<div class="al-on">${BELL}<span>แจ้งเตือนฝน: <b>เปิดอยู่</b></span></div>
+       <div class="al-btns"><button class="al-test">ส่งทดสอบ</button><button class="al-off">ปิด</button></div>
+       <p class="hint">เตือนก่อนฝนมาถึงราว 1 ชม. ที่ตำแหน่งล่าสุดที่เปิดแอป และที่ประจำที่กดกระดิ่งไว้ · เงียบช่วง 4 ทุ่ม–6 โมงเช้า</p>`
+    : `<button class="pl al-enable">${BELL}เปิดแจ้งเตือนฝนเข้ามือถือ</button>`;
+  box.querySelector<HTMLButtonElement>('.al-enable')?.addEventListener('click', enableAlerts);
+  box.querySelector<HTMLButtonElement>('.al-test')?.addEventListener('click', async () => {
+    try { await rainPush.sendTest(); toast('ส่งแล้ว รอดูข้อความเด้งในไม่กี่วินาที'); }
+    catch { toast('ส่งไม่สำเร็จ ลองปิดแล้วเปิดแจ้งเตือนใหม่', 5000); }
+  });
+  box.querySelector<HTMLButtonElement>('.al-off')?.addEventListener('click', async () => {
+    await rainPush.disable().catch(() => {});
+    toast('ปิดแจ้งเตือนฝนแล้ว');
+    renderAlertSection();
+  });
+}
+
+async function enableAlerts() {
+  if (!rainPush.pushSupported()) {
+    if (rainPush.isIos() && !rainPush.isStandalone()) {
+      showHelp(`<b>iPhone ต้องเพิ่มแอปลงหน้าจอโฮมก่อน</b>
+        <ol><li>กดปุ่ม <b>แชร์</b> (สี่เหลี่ยมมีลูกศรชี้ขึ้น) ด้านล่างของ Safari</li>
+        <li>เลือก <b>เพิ่มไปยังหน้าจอโฮม</b> แล้วกด <b>เพิ่ม</b></li>
+        <li>เปิด <b>ฟ้าฝน</b> จากไอคอนบนหน้าจอโฮม แล้วกดปุ่มเปิดแจ้งเตือนอีกครั้ง</li></ol>`);
+    } else {
+      toast('เบราว์เซอร์นี้รับแจ้งเตือนไม่ได้', 5000);
+    }
+    return;
+  }
+  if (!here && !loadPlaces().some((p) => p.alert)) {
+    toast('ต้องเปิดตำแหน่ง (GPS) หรือกดกระดิ่งที่ที่ประจำก่อน จะได้รู้ว่าให้เตือนที่ไหน', 6000);
+    return;
+  }
+  try {
+    await rainPush.enable(alertSpots());
+    toast('เปิดแจ้งเตือนฝนแล้ว');
+  } catch (e) {
+    toast(String(e).includes('denied')
+      ? 'ยังไม่ได้อนุญาต — ไปที่ การตั้งค่า > การแจ้งเตือน > ฟ้าฝน แล้วเปิด "อนุญาตการแจ้งเตือน"'
+      : 'เปิดแจ้งเตือนไม่สำเร็จ ลองใหม่อีกครั้ง', 7000);
+  }
+  renderAlertSection();
+}
+
+function showHelp(html: string) {
+  const d = $('#help');
+  d.innerHTML = `<div class="help-card glass">${html}<button class="help-ok">เข้าใจแล้ว</button></div>`;
+  d.hidden = false;
+  d.onclick = (e) => { if (e.target === d || (e.target as HTMLElement).classList.contains('help-ok')) d.hidden = true; };
 }
 
 function renderPlacesMenu() {
   const list = loadPlaces();
   const m = $('#places-menu');
   m.innerHTML = `<button class="pl gps"><svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/><circle cx="12" cy="12" r="7.5"/></svg>ตำแหน่งของฉัน</button>` +
-    (list.length ? list.map((p, i) => `<div class="pl-row"><button class="pl" data-i="${i}"><svg viewBox="0 0 24 24" class="ic star"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>${p.name}</button><button class="del" data-i="${i}" aria-label="เอาออก">×</button></div>`).join('')
-      : `<p class="hint">แตะแผนที่ แล้วกด "บันทึกที่นี่" เพื่อเก็บที่ประจำ</p>`);
+    (list.length ? list.map((p, i) => `<div class="pl-row"><button class="pl" data-i="${i}"><svg viewBox="0 0 24 24" class="ic star"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>${p.name}</button>${rainPush.serverReady() ? `<button class="bell${p.alert ? ' on' : ''}" data-i="${i}" aria-label="เตือนฝนที่นี่">${BELL}</button>` : ''}<button class="del" data-i="${i}" aria-label="เอาออก">×</button></div>`).join('')
+      : `<p class="hint">แตะแผนที่ แล้วกด "บันทึกที่นี่" เพื่อเก็บที่ประจำ</p>`) +
+    `<div class="alerts"></div>`;
+  renderAlertSection();
+  m.querySelectorAll<HTMLButtonElement>('.bell').forEach((b) => {
+    b.onclick = () => {
+      const i = Number(b.dataset.i), on = !loadPlaces()[i]?.alert;
+      setPlaceAlert(i, on);
+      renderPlacesMenu();
+      syncAlerts();
+      toast(on ? 'จะเตือนฝนที่นี่ด้วย' : 'เลิกเตือนฝนที่นี่');
+    };
+  });
   (m.querySelector('.gps') as HTMLButtonElement).onclick = () => { closePlacesMenu(); locate(false); };
   m.querySelectorAll<HTMLButtonElement>('.pl[data-i]').forEach((b) => {
     b.onclick = () => {
@@ -412,7 +505,7 @@ function renderPlacesMenu() {
     };
   });
   m.querySelectorAll<HTMLButtonElement>('.del').forEach((b) => {
-    b.onclick = () => { removePlace(Number(b.dataset.i)); renderPlacesMenu(); };
+    b.onclick = () => { removePlace(Number(b.dataset.i)); renderPlacesMenu(); syncAlerts(); };
   });
 }
 

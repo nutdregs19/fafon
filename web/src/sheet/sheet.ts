@@ -2,12 +2,13 @@
 import { describe } from './weather-codes';
 import { HOUR, dateShort, hourLabel, isToday, weekday } from '../util/time';
 
-const MODEL: Record<string, string> = { ecmwf: 'ecmwf_ifs025', gfs: 'gfs_seamless' };
+// European model only: 9 km first, the 25 km run fills any gap
+const MODEL: Record<string, string> = { ecmwf: 'ecmwf_ifs', ecmwf25: 'ecmwf_ifs025' };
 const HOURLY = ['temperature_2m', 'precipitation', 'precipitation_probability', 'wind_speed_10m', 'wind_direction_10m', 'weather_code'];
 const DAILY = ['weather_code', 'temperature_2m_max', 'temperature_2m_min', 'precipitation_sum', 'precipitation_probability_max', 'wind_speed_10m_max'];
 const CURRENT = ['temperature_2m', 'apparent_temperature', 'relative_humidity_2m', 'weather_code', 'wind_speed_10m', 'precipitation'];
 
-export interface Spot { lat: number; lon: number; name?: string }
+export interface Spot { lat: number; lon: number; name?: string; /** saved place: send rain alerts for it */ alert?: boolean }
 
 type Series = Record<string, (number | null)[]>;
 interface Data { hourly: Series & { time: number[] }; daily: Series & { time: number[] }; current: Record<string, number | null> }
@@ -112,7 +113,7 @@ export class Sheet {
     }
     if (my !== this.token) return;
     this.body.innerHTML = this.header(this.spot!.name ?? title) + this.now(d) + this.days(d) + this.chart(d) +
-      `<p class="note">ข้อมูลจุดนี้: Open-Meteo · แบบจำลอง${this.source === 'ecmwf' ? 'ยุโรป (ECMWF)' : 'อเมริกา (GFS)'}</p>`;
+      `<p class="note">ข้อมูลจุดนี้: Open-Meteo · แบบจำลองยุโรป (ECMWF)</p>`;
     this.bindHeader();
     this.body.querySelectorAll<HTMLElement>('.day').forEach((el) => {
       el.onclick = () => {

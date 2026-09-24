@@ -1,0 +1,15 @@
+# ฟ้าฝน — ตัวเฝ้าเรดาร์ส่งแจ้งเตือนฝน (Cloudflare Workers แผนฟรี)
+name = "fafon-alert"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# every 5 minutes
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "SUBS"
+id = "REPLACE_AFTER_KV_CREATE"
+
+[observability]
+enabled = true

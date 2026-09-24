@@ -1,6 +1,6 @@
 """Fetch every source, write PNG frames + manifest.json.
 
-usage: python render.py [--out DIR] [--max-steps N] [--only ecmwf|gfs]
+usage: python render.py [--out DIR] [--max-steps N] [--only ecmwf]
 """
 import argparse
 import datetime as dt
@@ -12,13 +12,12 @@ import traceback
 from common import ENC, grid_info, pack_png, write_atomic
 import fetch_ecmwf
 import fetch_ecmwf9
-import fetch_gfs
 
 # Each source lists fetchers in order of preference; the first that works wins.
 # ECMWF: native 9 km (Open-Meteo archive), falling back to ECMWF's own 25 km open data.
+# (GFS was dropped 24 Sep 2026 — the owner keeps only the European model; fetch_gfs.py stays for reference.)
 SOURCES = {
     "ecmwf": {"label": "ยุโรป", "credit": "ECMWF", "mods": [fetch_ecmwf9, fetch_ecmwf]},
-    "gfs": {"label": "อเมริกา", "credit": "NOAA GFS", "mods": [fetch_gfs]},
 }
 
 
