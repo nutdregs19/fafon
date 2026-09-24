@@ -8,6 +8,7 @@ import { RAMPS, gradientCss, legendPos, type LayerKey } from './map/palettes';
 import { Particles } from './wind/particles';
 import { Timeline } from './timeline/timeline';
 import { Satellite } from './satellite/satellite';
+import { Nowcast } from './satellite/nowcast';
 import { Sheet, type Spot } from './sheet/sheet';
 import { gps, isSaved, loadPlaces, placeName, removePlace, toggleSaved } from './places/places';
 import { HOUR, hourLabel } from './util/time';
@@ -34,6 +35,7 @@ let sourceKey = pref.get('source') || 'ecmwf';
 let field: FieldLayer;
 let particles: Particles;
 let sat: Satellite;
+let nowcast: Nowcast;
 let timeline: Timeline;
 let sheet: Sheet;
 let nowT = Date.now();
@@ -85,6 +87,8 @@ map.once('style.load', async () => {
   const before = map.getLayer('boundary_state') ? 'boundary_state' : undefined;
   field = new FieldLayer(map, Object.values(manifest.sources)[0].grid, before);
   sat = new Satellite(map, before);
+  nowcast = new Nowcast(map, before);
+  nowcast.onReady = () => scheduleRender(true);
   // Like Windy: the rain layer opens on the newest real radar picture (sharp, observed),
   // then press play / swipe right into the forecast. Only if the user hasn't moved yet.
   sat.onRadarReady = () => {
@@ -101,6 +105,8 @@ map.once('style.load', async () => {
   buildSourceToggle();
   timeline = new Timeline($('#timeline'), nowT - 12 * HOUR, nowT, lastFrameTime());
   timeline.tag = (t) => {
+    const nc = nowcastFade(t);
+    if (nc !== null) return nc === 1 ? 'ทำนายจากเรดาร์ (ระยะสั้น)' : 'ทำนายจากเรดาร์ → พยากรณ์';
     if (t >= nowT) return `พยากรณ์ · ${manifest.sources[sourceKey].label}`;
     const r = sat.radarFor(t);
     if (r === null) return `ภาพดาวเทียมจริง · ถ่ายเมื่อ ${hourLabel(sat.frameFor(t))}`;
@@ -113,6 +119,7 @@ map.once('style.load', async () => {
 
   map.on('click', (e) => pick({ lat: e.lngLat.lat, lon: e.lngLat.lng }, false));
   map.on('moveend', flipPicker);
+  map.on('moveend', () => scheduleRender()); // the nowcast follows the view
   $('#place-chip').onclick = () => togglePlacesMenu();
   renderPlacesMenu();
   locate(true);
@@ -213,27 +220,59 @@ function scheduleRender(force = false) {
   pending = requestAnimationFrame(() => { pending = 0; render(); });
 }
 
+// Radar nowcast on the rain layer: full strength for the first hour after the newest radar
+// picture, then fading into the model forecast over the second hour.
+const NOWCAST_FULL = 60 * 60_000, NOWCAST_END = 120 * 60_000;
+/** Nowcast strength at time t (1 = only nowcast), or null when it doesn't apply. */
+function nowcastFade(t: number): number | null {
+  const r = sat?.latestRadar();
+  if (layer !== 'rain' || r == null) return null;
+  const lead = t - r;
+  if (lead <= 5 * 60_000 || lead >= NOWCAST_END) return null;
+  return lead <= NOWCAST_FULL ? 1 : 1 - (lead - NOWCAST_FULL) / (NOWCAST_END - NOWCAST_FULL);
+}
+
+function drawField(f: Field | null, t: number) {
+  // redraw the colours only when something visible changed (~10 min of model time)
+  if (f && (Math.abs(t - lastDraw.t) >= 10 * 60_000 || lastDraw.layer !== layer || lastDraw.source !== sourceKey || Number.isNaN(lastDraw.t))) {
+    field.draw(f, layer);
+    lastDraw = { t, layer, source: sourceKey };
+  }
+}
+
 function render() {
   const t = timeline.t, store = stores[sourceKey];
-  const past = t < nowT;
+  const fade = nowcastFade(t);
+  const past = t < nowT && fade === null;
   let f: Field | null;
-  if (past) {
+  if (fade !== null) {
+    sat.hide();
+    nowcast.prepare(sat.radarList());
+    nowcast.show((t - sat.latestRadar()!) / 60_000, fade);
+    f = store.at(t);
+    // the forecast underneath shows through as the nowcast fades (or alone until it's ready)
+    const ncShown = nowcast.ready;
+    field.setVisible(!ncShown || fade < 1);
+    field.setOpacity(ncShown ? 1 - fade : 1);
+    drawField(f, t);
+    setTheme('grey');
+    particles.setAlpha(0);
+  } else if (past) {
+    nowcast.hide();
     sat.show(t, layer === 'rain');
     field.setVisible(false);
     f = store.at(nowT);
     setTheme(sat.mode === 'radar' ? 'grey' : 'dark');
     particles.setAlpha(0); // observed pictures: no model wind lines on top
   } else {
+    nowcast.hide();
     sat.hide();
     field.setVisible(true);
+    field.setOpacity(1);
     f = store.at(t);
     setTheme(layer === 'rain' ? 'grey' : 'dark');
     particles.setAlpha(WIND_ALPHA[layer]);
-    // redraw the colours only when something visible changed (~10 min of model time)
-    if (f && (Math.abs(t - lastDraw.t) >= 10 * 60_000 || lastDraw.layer !== layer || lastDraw.source !== sourceKey || Number.isNaN(lastDraw.t))) {
-      field.draw(f, layer);
-      lastDraw = { t, layer, source: sourceKey };
-    }
+    drawField(f, t);
   }
   $('#app-loading')?.remove();
   particles.setField(f);

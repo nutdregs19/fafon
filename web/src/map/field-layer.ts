@@ -108,6 +108,13 @@ export class FieldLayer {
     }
   }
 
+  private opacity = 1;
+  setOpacity(o: number) {
+    if (Math.abs(o - this.opacity) < 0.01) return;
+    this.opacity = o;
+    this.map.setPaintProperty('field', 'raster-opacity', o);
+  }
+
   setVisible(on: boolean) {
     this.map.setLayoutProperty('field', 'visibility', on ? 'visible' : 'none');
   }

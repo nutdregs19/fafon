@@ -86,6 +86,7 @@ export class Satellite {
   private radar: TimedRaster;
   private radarFrames: { t: number; path: string }[] = [];
   private radarHost = '';
+  private radarHttps = '';
   /** called once the list of radar pictures has arrived */
   onRadarReady: () => void = () => {};
 
@@ -104,8 +105,13 @@ export class Satellite {
     registerRadarProtocol();
     fetch('https://api.rainviewer.com/public/weather-maps.json')
       .then((r) => r.json())
-      .then((j) => { this.radarHost = String(j.host).replace(/^https?:\/\//, PROTOCOL + '://'); this.radarFrames = j.radar.past.map((f: any) => ({ t: f.time * 1000, path: f.path })); this.onRadarReady(); })
+      .then((j) => { this.radarHttps = String(j.host); this.radarHost = String(j.host).replace(/^https?:\/\//, PROTOCOL + '://'); this.radarFrames = j.radar.past.map((f: any) => ({ t: f.time * 1000, path: f.path })); this.onRadarReady(); })
       .catch(() => { /* radar is optional */ });
+  }
+
+  /** Radar pictures as plain https tile URLs, oldest first (for the nowcast). */
+  radarList() {
+    return this.radarFrames.map((f) => ({ t: f.t, url: `${this.radarHttps}${f.path}/256/{z}/{x}/{y}/2/0_0.png` }));
   }
 
   /** Time of the newest radar picture, or null if radar isn't available. */
