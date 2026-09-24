@@ -1,0 +1,64 @@
+import { defineConfig } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
+
+export default defineConfig({
+  base: './',
+  build: { target: 'es2020', chunkSizeWarningLimit: 1500 },
+  worker: { format: 'es' },
+  plugins: [
+    VitePWA({
+      registerType: 'autoUpdate',
+      includeAssets: ['icons/apple-touch-icon.png'],
+      manifest: {
+        name: 'ฟ้าฝน — พยากรณ์อากาศ',
+        short_name: 'ฟ้าฝน',
+        description: 'ดูฝน เมฆ ลม อุณหภูมิ ล่วงหน้า 10 วัน',
+        lang: 'th',
+        display: 'standalone',
+        orientation: 'portrait',
+        background_color: '#0b0f17',
+        theme_color: '#0b0f17',
+        start_url: './',
+        scope: './',
+        icons: [
+          { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+          { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+          { src: 'icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+        ],
+      },
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,svg,png,webmanifest}'],
+        globIgnores: ['data/**'],
+        navigateFallbackDenylist: [/\/data\//],
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) => url.pathname.endsWith('/data/manifest.json'),
+            handler: 'NetworkFirst',
+            options: { cacheName: 'manifest', networkTimeoutSeconds: 6 },
+          },
+          {
+            // frame names contain the run time, so a cached file never goes stale
+            urlPattern: ({ url }) => /\/data\/(ecmwf|gfs)\/.*\.png$/.test(url.pathname),
+            handler: 'CacheFirst',
+            options: { cacheName: 'frames', expiration: { maxEntries: 700, maxAgeSeconds: 3 * 86400 } },
+          },
+          {
+            urlPattern: ({ url }) => url.hostname === 'tiles.openfreemap.org',
+            handler: 'StaleWhileRevalidate',
+            options: { cacheName: 'basemap', expiration: { maxEntries: 3000, maxAgeSeconds: 30 * 86400 } },
+          },
+          {
+            urlPattern: ({ url }) => url.hostname === 'gibs.earthdata.nasa.gov',
+            handler: 'CacheFirst',
+            options: { cacheName: 'satellite', expiration: { maxEntries: 600, maxAgeSeconds: 86400 } },
+          },
+          {
+            urlPattern: ({ url }) => url.hostname.endsWith('fonts.googleapis.com') || url.hostname.endsWith('fonts.gstatic.com'),
+            handler: 'CacheFirst',
+            options: { cacheName: 'fonts', expiration: { maxEntries: 30, maxAgeSeconds: 365 * 86400 } },
+          },
+        ],
+      },
+    }),
+  ],
+});

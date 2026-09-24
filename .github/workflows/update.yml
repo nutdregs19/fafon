@@ -1,0 +1,68 @@
+# Every 6 hours: fetch the newest ECMWF + GFS runs, rebuild the app, publish to GitHub Pages.
+name: อัปเดตพยากรณ์
+
+on:
+  schedule:
+    # UTC. 08:20 and 20:20 catch the new ECMWF 00z/12z runs; 02:20 and 14:20 catch GFS.
+    - cron: '20 2,8,14,20 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+      - run: pip install -r pipeline/requirements.txt
+      - name: ดึงข้อมูลพยากรณ์
+        run: python pipeline/render.py --out web/public/data
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: web/dist
+
+      # GitHub pauses scheduled jobs in public repos after 60 quiet days; re-enabling keeps it running.
+      - name: กันตารางเวลาหยุดเอง
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update.yml/enable" || true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

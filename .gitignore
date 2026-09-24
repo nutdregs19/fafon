@@ -1,0 +1,10 @@
+pipeline/.venv/
+pipeline/__pycache__/
+web/node_modules/
+web/dist/
+web/public/data/
+_test_data/
+*.tmp
+*.grib2
+*.bak-*
+_test9/
