@@ -5,6 +5,12 @@ export default defineConfig({
   base: './',
   build: { target: 'es2020', chunkSizeWarningLimit: 1500 },
   worker: { format: 'es' },
+  // local preview shows the same forecast data as the live site (no multi-GB download on this PC)
+  server: {
+    proxy: {
+      '/data': { target: 'https://nutdregs19.github.io', changeOrigin: true, rewrite: (p) => '/fafon' + p },
+    },
+  },
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',

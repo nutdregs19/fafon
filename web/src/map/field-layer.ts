@@ -4,6 +4,10 @@ import type { Map as MLMap, CanvasSource } from 'maplibre-gl';
 import type { Field, Grid } from '../data/store';
 import { RAMPS, cachedLut, lutIndex, type LayerKey } from './palettes';
 
+// Forecast rain below this rate is hidden (fades in over RAIN_FADE): models spread a thin
+// drizzle haze over whole regions, which buries the real rain cells. Tapping still reads it.
+const RAIN_MIN = 0.35, RAIN_FADE = 0.3; // mm/h
+
 const merc = (lat: number) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
 const unmerc = (y: number) => (360 / Math.PI) * Math.atan(Math.exp(y)) - 90;
 
@@ -124,10 +128,11 @@ export class FieldLayer {
     for (let i = 0, o = 0; i < up.length; i++, o += 4) {
       let k = lutIndex(ramp, up[i]);
       let R = lut[k], G = lut[k + 1], B = lut[k + 2], A = lut[k + 3];
+      if (layer === 'rain') A *= Math.min(1, Math.max(0, (up[i] - RAIN_MIN) / RAIN_FADE));
       if (layer === 'clouds') {
         // rain shows through the cloud deck, as on Windy's cloud layer
         const pv = upRain[i];
-        if (pv > 0.2) {
+        if (pv > RAIN_MIN + RAIN_FADE / 2) {
           k = lutIndex(rainRamp, pv);
           // straight-alpha "rain over cloud": weight the cloud's own RGB by its own
           // alpha too, so a near-invisible clear-sky pixel doesn't tint the rain colour
