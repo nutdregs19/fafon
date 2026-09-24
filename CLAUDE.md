@@ -61,6 +61,8 @@
   - เตือนเมื่อ: ฝนจะมาใน ≤60 นาที · ฝนเริ่มตกโดยไม่ได้เตือนก่อน · แบบจำลองบอกฝนหนัก ≤3 ชม. โอกาส ≥50% (ไม่เกิน 6 ชม.ครั้ง) · เงียบ 22:00–06:00
   - จุดที่เฝ้า: ตำแหน่งล่าสุดที่เปิดแอป + ที่ประจำที่กดกระดิ่ง (PWA บน iPhone อ่าน GPS ตอนปิดแอปไม่ได้)
   - กุญแจ VAPID: ตัวลับอยู่ `alert-server/.dev.vars` (ไม่ขึ้น git) + secret `VAPID_PRIVATE` บน Cloudflare · ตัวเปิดเผยอยู่ใน `web/src/alert/push.ts`
+  - **ขึ้นแล้ว 24 ก.ย. 2569:** https://fafon-alert.nuttakit66.workers.dev · บัญชี Cloudflare ของเจ้าของ (nuttakit66@gmail.com) · wrangler ล็อกอินไว้ในเครื่องนี้ · ส่งขึ้นใหม่: `cd alert-server && npx wrangler deploy` · ดูรอบทำงาน: `npx wrangler tail`
+  - วัดจริง: CPU 20–43 ms ต่อรอบ (2 จุด) เกินตัวเลข 10 ms ของแผนฟรี แต่ผล `ok` ทุกรอบ · ถ้าวันไหนขึ้น `exceededCpu` ต้องแยกงานเป็นรอบละจุด
   - ที่อยู่เซิร์ฟเวอร์ใส่ที่ `PROD_SERVER` ใน `push.ts` · ว่าง = ซ่อนปุ่มแจ้งเตือน · ทดสอบกับเซิร์ฟเวอร์บนเครื่อง: localStorage `fafon.alertServer` · พรีวิว `fafon-alert` (8787)
 - กับดัก:
   - **`@pushforge/builder` ส่งรหัสแบบเก่า `aesgcm` ที่ Apple ไม่รับ** → ใช้ `@block65/webcrypto-web-push` v2 (aes128gcm) · มีสคริปต์ถอดรหัสทดสอบ `alert-server/test/push-test.ts`

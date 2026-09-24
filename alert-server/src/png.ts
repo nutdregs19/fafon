@@ -29,26 +29,36 @@ export async function decodeRadarPng(buf: ArrayBuffer): Promise<(i: number) => n
   for (const c of idat) { joined.set(c, o); o += c.length; }
   const raw = await inflate(joined);
 
-  // undo the per-row filters (bytes per pixel = 4)
+  // undo the per-row filters (bytes per pixel = 4), lazily: rows are decoded only down to the
+  // lowest row actually asked for (each row depends on the one above, so it goes top-down)
   const stride = w * 4, px = new Uint8Array(stride * h);
-  for (let y = 0; y < h; y++) {
-    const f = raw[y * (stride + 1)], src = y * (stride + 1) + 1;
-    for (let i = 0; i < stride; i++) {
-      const d = y * stride + i, x = raw[src + i], a = i >= 4 ? px[d - 4] : 0;
-      const up = y ? px[d - stride] : 0, c = y && i >= 4 ? px[d - stride - 4] : 0;
-      let v: number;
-      switch (f) {
-        case 0: v = x; break;
-        case 1: v = x + a; break;
-        case 2: v = x + up; break;
-        case 3: v = x + ((a + up) >> 1); break;
-        default: { // Paeth
-          const p = a + up - c, pa = Math.abs(p - a), pb = Math.abs(p - up), pc = Math.abs(p - c);
-          v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? up : c);
+  let done = 0;
+  const upTo = (row: number) => {
+    for (let y = done; y <= row && y < h; y++) {
+      const f = raw[y * (stride + 1)], src = y * (stride + 1) + 1;
+      for (let i = 0; i < stride; i++) {
+        const d = y * stride + i, x = raw[src + i], a = i >= 4 ? px[d - 4] : 0;
+        const up = y ? px[d - stride] : 0, c = y && i >= 4 ? px[d - stride - 4] : 0;
+        let v: number;
+        switch (f) {
+          case 0: v = x; break;
+          case 1: v = x + a; break;
+          case 2: v = x + up; break;
+          case 3: v = x + ((a + up) >> 1); break;
+          default: { // Paeth
+            const p = a + up - c, pa = Math.abs(p - a), pb = Math.abs(p - up), pc = Math.abs(p - c);
+            v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? up : c);
+          }
         }
+        px[d] = v & 255;
       }
-      px[d] = v & 255;
+      done = y + 1;
     }
-  }
-  return (i: number) => { const p = i * 4; return pixelDbz(px[p], px[p + 1], px[p + 2], px[p + 3]); };
+  };
+  return (i: number) => {
+    const row = Math.floor(i / w);
+    if (row >= done) upTo(row);
+    const p = i * 4;
+    return pixelDbz(px[p], px[p + 1], px[p + 2], px[p + 3]);
+  };
 }

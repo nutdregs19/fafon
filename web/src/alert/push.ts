@@ -5,7 +5,7 @@ import type { Spot } from '../sheet/sheet';
 
 // the server's address; filled in once it's deployed to Cloudflare.
 // localStorage 'fafon.alertServer' overrides it (for testing a local copy of the server).
-const PROD_SERVER = '';
+const PROD_SERVER = 'https://fafon-alert.nuttakit66.workers.dev';
 const SERVER = (() => { try { return localStorage.getItem('fafon.alertServer'); } catch { return null; } })()
   ?? (import.meta.env.DEV ? 'http://localhost:8787' : PROD_SERVER);
 const VAPID_PUBLIC = 'BKSBZle35B2xpasZzkgzVwvAxOF0WEhOUIjPwR4_msb9JX1Q9dQZ4OrMYgfG6B8OVx_n1Fqx8PUztR2grFtnbQI';

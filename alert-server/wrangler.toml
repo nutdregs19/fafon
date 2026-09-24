@@ -2,6 +2,8 @@
 name = "fafon-alert"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
+workers_dev = true
+preview_urls = false
 
 # every 5 minutes
 [triggers]
@@ -9,7 +11,7 @@ crons = ["*/5 * * * *"]
 
 [[kv_namespaces]]
 binding = "SUBS"
-id = "REPLACE_AFTER_KV_CREATE"
+id = "5f9bbee5dd984c9393bcce8a316d17ac"
 
 [observability]
 enabled = true
