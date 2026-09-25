@@ -4,11 +4,18 @@
 export interface Grid { w: number; h: number; lat0: number; lon0: number; dlat: number; dlon: number }
 interface Enc { u: [number, number]; v: [number, number]; t: [number, number]; p: { max: number }; c: [number, number] }
 export interface Frame { t: number; f: string }
-export interface Source { key: string; label: string; credit: string; run: number; grid: Grid; frames: Frame[] }
+/** `tile`: the source is cut into square tiles of this many px (the world); frame paths are folders. */
+export interface Source { key: string; label: string; credit: string; run: number; grid: Grid; frames: Frame[]; tile?: number }
 export interface Manifest { generated: number; enc: Enc; sources: Record<string, Source> }
 
-/** One forecast moment on its source's grid. u/v m/s, t deg C, p mm/h, c % */
-export interface Field { g: Grid; u: Float32Array; v: Float32Array; t: Float32Array; p: Float32Array; c: Float32Array }
+/** One forecast moment on its source's grid. u/v m/s, t deg C, p mm/h, c %.
+ *  `feather`: degrees over which a regional field fades into the coarser world one (0 = world). */
+export interface Field { g: Grid; u: Float32Array; v: Float32Array; t: Float32Array; p: Float32Array; c: Float32Array; feather: number;
+  /** which frames/tiles it was made from (not the blend weight): a change means a redraw */
+  src?: string }
+
+/** A lon/lat box. West may be > 180 or east < -180 past the date line (map world copies). */
+export interface Box { w: number; s: number; e: number; n: number }
 
 const BASE = 'data/';
 const KEEP = 48;      // frames kept in memory (raw pixels, ~1 MB each at 9 km)
@@ -21,7 +28,7 @@ export async function loadManifest(): Promise<Manifest> {
   const sources: Record<string, Source> = {};
   for (const [key, s] of Object.entries<any>(m.sources)) {
     sources[key] = {
-      key, label: s.label, credit: s.credit, run: Date.parse(s.run), grid: s.grid ?? m.grid,
+      key, label: s.label, credit: s.credit, run: Date.parse(s.run), grid: s.grid ?? m.grid, tile: s.tile,
       frames: s.frames.map((f: any) => ({ t: Date.parse(f.t), f: f.f })),
     };
   }
@@ -40,7 +47,7 @@ export class FrameStore {
 
   constructor(m: Manifest, public src: Source) {
     const g = src.grid, n = g.w * g.h;
-    this.mix = { g, u: new Float32Array(n), v: new Float32Array(n), t: new Float32Array(n), p: new Float32Array(n), c: new Float32Array(n) };
+    this.mix = { g, u: new Float32Array(n), v: new Float32Array(n), t: new Float32Array(n), p: new Float32Array(n), c: new Float32Array(n), feather: 1.5 };
     const e = m.enc, lin = (r: [number, number]) => Float32Array.from({ length: 256 }, (_, b) => r[0] + (b / 255) * (r[1] - r[0]));
     this.lut = { u: lin(e.u), v: lin(e.v), t: lin(e.t), c: lin(e.c), p: Float32Array.from({ length: 256 }, (_, b) => (b / 255) ** 2 * e.p.max) };
   }
@@ -80,6 +87,7 @@ export class FrameStore {
     if (key === this.mixKey) return this.mix;
     this.decodeInto(pa, pb, w);
     this.mixKey = key;
+    this.mix.src = `${a.f}|${pb ? b.f : ''}`;
     return this.mix;
   }
 

@@ -8,3 +8,4 @@ _test_data/
 *.grib2
 *.bak-*
 _test9/
+_test_world/

@@ -1,4 +1,4 @@
-// NASA GIBS serves Himawari infrared already painted in a rainbow "enhanced IR" scale
+// NASA GIBS serves Himawari / GOES infrared already painted in a rainbow "enhanced IR" scale
 // (grey for warm/low cloud, then cyan -> blue -> green -> yellow -> red for ever colder,
 // higher cloud tops, with the coldest storm cores going dark/grey again inside the red).
 // Tiles are resampled, so colours can't be decoded exactly; instead we estimate how
@@ -41,6 +41,9 @@ export function registerSatelliteProtocol() {
     const c = new Float32Array(w * h);
     const hot = new Uint8Array(w * h); // red-class pixels: the cold storm tops
     for (let i = 0, p = 0; i < c.length; i++, p += 4) {
+      // no data (off the satellite's disc, gaps in the GOES pictures): never cloud, and never
+      // flood-filled as a "cold core" — that painted white blocks next to storms
+      if (d[p + 3] < 128) { c[i] = 0; continue; }
       c[i] = coldness(d[p], d[p + 1], d[p + 2]);
       if (c[i] >= 0.9) hot[i] = 1;
     }
@@ -48,7 +51,10 @@ export function registerSatelliteProtocol() {
     // coldest cores (the scale turns dark/grey again there). Storm tops are ringed by
     // yellow/green/blue, so the fill never leaks out into ordinary warm grey.
     // Capped at a few pixels in case a ring is broken and red touches warm grey directly.
-    const MAX_REACH = 14;
+    // The cap is in ground distance: zoomed-out tiles shrink a core to fewer pixels, and a
+    // fixed 14 px reach there filled whole squares of sky white around every storm.
+    const z = Number(/\/(\d+)\/\d+\/\d+\.png$/.exec(url)?.[1] ?? 6);
+    const MAX_REACH = Math.max(1, Math.round(14 * 2 ** (Math.min(6, z) - 6)));
     const queue: number[] = [], dist = new Uint8Array(w * h);
     for (let i = 0; i < hot.length; i++) if (hot[i]) queue.push(i);
     for (let q = 0; q < queue.length; q++) {

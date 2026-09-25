@@ -4,7 +4,7 @@
 // when rain is about to arrive. Storage: two KV keys — "subs" (phones + spots) and "state"
 // (what was last said per spot, so the same rain isn't announced twice).
 import { buildPushPayload } from '@block65/webcrypto-web-push';
-import { alertText, checkSpot, type RainAlert } from '../../web/src/alert/rain-alert';
+import { alertText, checkSpot, localHour, type RainAlert } from '../../web/src/alert/rain-alert';
 import { decodeRadarPng } from './png';
 
 interface Env {
@@ -44,9 +44,8 @@ async function hash(s: string) {
 
 const loadSubs = async (env: Env) => ((await env.SUBS.get('subs', 'json')) as Sub[] | null) ?? [];
 
-// quiet at night, Thai time
-const bangkokHour = (t: number) => new Date(t + 7 * 3600_000).getUTCHours();
-const quiet = (t: number) => { const h = bangkokHour(t); return h >= 22 || h < 6; };
+// quiet at night, by the clock where the spot is (Thailand, or wherever the traveller is)
+const quiet = (t: number, tz?: number) => { const h = localHour(t, tz); return h >= 22 || h < 6; };
 
 /** VAPID keys from the stored JWK: public = raw point (0x04 | x | y), private = d. Both base64url. */
 function vapidKeys(env: Env) {
@@ -111,7 +110,7 @@ async function run(env: Env) {
       const prev = state[key];
       console.log('spot', s.id, JSON.stringify(a));
       const next: SpotState = { ...prev, kind: a.kind };
-      if (!quiet(now) && worthSaying(a, prev, now)) {
+      if (!quiet(now, a.tz) && worthSaying(a, prev, now)) {
         const { title, body } = alertText(a);
         const where = s.name ? `${s.name}: ` : '';
         try {

@@ -1,6 +1,7 @@
 // Windy-style flowing wind lines, drawn on a 2D canvas laid over the map.
 import type { Map as MLMap } from 'maplibre-gl';
-import { sample, type Field } from '../data/store';
+import type { Field } from '../data/store';
+import { sampleAt } from '../data/world';
 
 const merc = (lat: number) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
 const unmerc = (y: number) => (360 / Math.PI) * Math.atan(Math.exp(y)) - 90;
@@ -11,7 +12,7 @@ export class Particles {
   private xs = new Float32Array(0);
   private ys = new Float32Array(0);
   private age = new Uint16Array(0);
-  private field: Field | null = null;
+  private fields: Field[] = [];
   private alpha = 0.78;
   private running = false;
   private moving = false;
@@ -29,7 +30,7 @@ export class Particles {
     this.resize();
   }
 
-  setField(f: Field | null) { this.field = f; }
+  setFields(f: Field[]) { this.fields = f; }
 
   /** Line strength: faint over rain so the rain stays readable, strong on the wind layer. */
   setAlpha(a: number) {
@@ -67,8 +68,8 @@ export class Particles {
   }
 
   private step() {
-    const f = this.field, ctx = this.ctx, cw = this.canvas.width, ch = this.canvas.height;
-    if (!f || this.moving || this.alpha <= 0) { if (this.alpha <= 0) this.clear(); return; }
+    const f = this.fields, ctx = this.ctx, cw = this.canvas.width, ch = this.canvas.height;
+    if (!f.length || this.moving || this.alpha <= 0) { if (this.alpha <= 0) this.clear(); return; }
     // fade the old trails
     ctx.globalCompositeOperation = 'destination-in';
     ctx.fillStyle = 'rgba(0,0,0,0.93)';
@@ -82,7 +83,7 @@ export class Particles {
       const x = this.xs[i], y = this.ys[i];
       if (++this.age[i] > MAX_AGE) { this.respawn(i, false); continue; }
       const lon = this.lonW + x * kx, lat = unmerc(this.yTop + y * ky);
-      const u = sample(f.g, f.u, lon, lat), v = sample(f.g, f.v, lon, lat);
+      const u = sampleAt(f, 'u', lon, lat), v = sampleAt(f, 'v', lon, lat);
       if (Number.isNaN(u)) { this.respawn(i, false); continue; }
       const nx = x + u * speed, ny = y - v * speed;
       if (nx < 0 || ny < 0 || nx > cw || ny > ch) { this.respawn(i, false); continue; }

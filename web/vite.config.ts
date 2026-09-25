@@ -1,5 +1,28 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+import fs from 'node:fs';
+import path from 'node:path';
 import { VitePWA } from 'vite-plugin-pwa';
+
+// Local test data: FAFON_DATA=<folder> serves files found there (and its manifest-merged.json as
+// the manifest); everything else still comes from the live site through the proxy below.
+function localData(): Plugin {
+  const dir = process.env.FAFON_DATA;
+  return {
+    name: 'fafon-local-data',
+    configureServer(server) {
+      if (!dir) return;
+      server.middlewares.use((req, res, next) => {
+        const url = (req.url || '').split('?')[0];
+        if (!url.startsWith('/data/')) return next();
+        const rel = url === '/data/manifest.json' ? 'manifest-merged.json' : decodeURIComponent(url.slice(6));
+        const file = path.resolve(dir, rel);
+        if (!file.startsWith(path.resolve(dir)) || !fs.existsSync(file)) return next();
+        res.setHeader('Content-Type', file.endsWith('.json') ? 'application/json' : 'image/png');
+        fs.createReadStream(file).pipe(res);
+      });
+    },
+  };
+}
 
 export default defineConfig({
   base: './',
@@ -12,6 +35,7 @@ export default defineConfig({
     },
   },
   plugins: [
+    localData(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['icons/apple-touch-icon.png'],
@@ -45,9 +69,9 @@ export default defineConfig({
           },
           {
             // frame names contain the run time, so a cached file never goes stale
-            urlPattern: ({ url }) => /\/data\/(ecmwf|gfs)\/.*\.png$/.test(url.pathname),
+            urlPattern: ({ url }) => /\/data\/(ecmwf|gfs|world)\/.*\.png$/.test(url.pathname),
             handler: 'CacheFirst',
-            options: { cacheName: 'frames', expiration: { maxEntries: 700, maxAgeSeconds: 3 * 86400 } },
+            options: { cacheName: 'frames', expiration: { maxEntries: 1500, maxAgeSeconds: 3 * 86400 } },
           },
           {
             urlPattern: ({ url }) => url.hostname === 'tiles.openfreemap.org',

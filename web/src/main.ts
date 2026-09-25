@@ -2,7 +2,8 @@ import { Map as MLMap, Marker, setWorkerUrl } from 'maplibre-gl';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
-import { FrameStore, loadManifest, sample, type Field, type Manifest } from './data/store';
+import { loadManifest, type Field, type Manifest } from './data/store';
+import { Weather, sampleAt } from './data/world';
 import { FieldLayer } from './map/field-layer';
 import { RAMPS, gradientCss, legendPos, type LayerKey } from './map/palettes';
 import { Particles } from './wind/particles';
@@ -32,8 +33,8 @@ const LAYERS: { key: LayerKey; label: string; icon: string }[] = [
 
 let layer = (pref.get('layer') as LayerKey) || 'rain';
 let manifest: Manifest;
-let stores: Record<string, FrameStore> = {};
-let sourceKey = 'ecmwf';
+let weather: Weather;
+const sourceKey = 'ecmwf'; // the point sheet's model (European)
 let field: FieldLayer;
 let particles: Particles;
 let sat: Satellite;
@@ -47,7 +48,7 @@ let gpsMarker: Marker | null = null;
 let here: Spot | null = null; // last GPS fix, for the alert strip and phone alerts
 const banner = new RainBanner($('#rain-alert'));
 banner.onTap = (s) => { map.flyTo({ center: [s.lon, s.lat], zoom: Math.max(map.getZoom(), 6) }); pick({ ...s }, true); };
-let lastDraw = { t: NaN, layer: '', source: '' };
+let lastDraw = { t: NaN, layer: '', key: '' };
 
 function toast(msg: string, ms = 3000) {
   const t = $('#toast');
@@ -61,9 +62,8 @@ const map = new MLMap({
   style: 'https://tiles.openfreemap.org/styles/dark',
   center: [100.6, 13.5],
   zoom: 4.4,
-  minZoom: 3,
+  minZoom: 1.5,
   maxZoom: 11.5,
-  maxBounds: [[70, -18], [140, 42]],
   dragRotate: false,
   pitchWithRotate: false,
   touchPitch: false,
@@ -71,6 +71,7 @@ const map = new MLMap({
   fadeDuration: 0,
 });
 map.touchZoomRotate.disableRotation();
+if (import.meta.env.DEV) (window as any).__map = map; // for checking in the preview
 map.keyboard.disableRotation();
 
 const manifestP = loadManifest();
@@ -88,9 +89,10 @@ map.once('style.load', async () => {
     toast('โหลดข้อมูลพยากรณ์ไม่ได้ ตรวจอินเทอร์เน็ตแล้วเปิดใหม่', 8000);
     return;
   }
-  if (!manifest.sources[sourceKey]) sourceKey = Object.keys(manifest.sources)[0];
   const before = map.getLayer('boundary_state') ? 'boundary_state' : undefined;
-  field = new FieldLayer(map, Object.values(manifest.sources)[0].grid, before);
+  field = new FieldLayer(map, before);
+  weather = new Weather(manifest);
+  weather.onLoaded = () => scheduleRender();
   sat = new Satellite(map, before);
   nowcast = new Nowcast(map, before);
   nowcast.onReady = () => scheduleRender(true);
@@ -107,23 +109,28 @@ map.once('style.load', async () => {
   sheet.onSave = (s) => { toggleSaved(s); renderPlacesMenu(); toast(isSaved(s) ? 'บันทึกเป็นที่ประจำแล้ว' : 'เอาออกจากที่ประจำแล้ว'); };
 
   buildLayerButtons();
-  timeline = new Timeline($('#timeline'), nowT - 12 * HOUR, nowT, lastFrameTime());
+  timeline = new Timeline($('#timeline'), nowT - 12 * HOUR, nowT, weather.lastTime());
   timeline.tag = (t) => {
     const nc = nowcastFade(t);
     if (nc !== null) return nc === 1 ? 'ทำนายจากเรดาร์ (ระยะสั้น)' : 'ทำนายจากเรดาร์ → พยากรณ์';
     if (t >= nowT) return 'พยากรณ์';
     const r = sat.radarFor(t);
+    if (r === null && !sat.hasSat()) return 'แถบนี้ไม่มีภาพดาวเทียม · แสดงพยากรณ์แทน';
     if (r === null) return `ภาพดาวเทียมจริง · ถ่ายเมื่อ ${hourLabel(sat.frameFor(t))}`;
-    return layer === 'rain' ? `เรดาร์ฝนจริง · ${hourLabel(r)}` : `ดาวเทียม + เรดาร์ฝน · ${hourLabel(r)}`;
+    return layer === 'rain' || !sat.hasSat() ? `เรดาร์ฝนจริง · ${hourLabel(r)}` : `ดาวเทียม + เรดาร์ฝน · ${hourLabel(r)}`;
   };
   timeline.onChange = (t) => { scheduleRender(); schedulePrefetch(t); };
   timeline.set(nowT, false);
-  useSource(sourceKey);
+  scheduleRender(true);
   particles.start();
 
   map.on('click', (e) => pick({ lat: e.lngLat.lat, lon: e.lngLat.lng }, false));
   map.on('moveend', flipPicker);
-  map.on('moveend', () => scheduleRender()); // the nowcast follows the view
+  // the nowcast and the forecast canvas follow the view; fetch the new area's forecast tiles
+  map.on('moveend', () => {
+    scheduleRender(); schedulePrefetch(timeline.t);
+    timeline.set(timeline.t, false); // the time bubble says which satellite covers the view
+  });
   $('#place-chip').onclick = () => togglePlacesMenu();
   renderPlacesMenu();
   locate(true);
@@ -190,28 +197,11 @@ function setTheme(t: Theme) {
 // wind lines belong to the wind layer only — each layer shows one thing, clearly
 const WIND_ALPHA: Record<LayerKey, number> = { rain: 0, clouds: 0, wind: 0.8, temp: 0 };
 
-function lastFrameTime() {
-  const fr = manifest.sources[sourceKey].frames;
-  return fr[fr.length - 1].t;
-}
-
-function useSource(key: string) {
-  sourceKey = key;
-  if (!stores[key]) {
-    stores[key] = new FrameStore(manifest, manifest.sources[key]);
-    stores[key].onLoaded = () => scheduleRender();
-  }
-  stores[key].prefetch(Math.max(timeline.t, nowT));
-  timeline.setRange(nowT - 12 * HOUR, nowT, lastFrameTime());
-  sheet.setSource(key);
-  scheduleRender(true);
-}
-
 // keep downloading the frames around wherever the user is looking (memory holds only a window)
 let prefetchTimer = 0;
 function schedulePrefetch(t: number) {
   clearTimeout(prefetchTimer);
-  prefetchTimer = window.setTimeout(() => stores[sourceKey]?.prefetch(Math.max(t, nowT)), 250);
+  prefetchTimer = window.setTimeout(() => { if (field.extent.e > field.extent.w) weather.prefetch(Math.max(t, nowT), field.extent); }, 250);
 }
 
 let pending = 0;
@@ -233,24 +223,28 @@ function nowcastFade(t: number): number | null {
   return lead <= NOWCAST_FULL ? 1 : 1 - (lead - NOWCAST_FULL) / (NOWCAST_END - NOWCAST_FULL);
 }
 
-function drawField(f: Field | null, t: number) {
-  // redraw the colours only when something visible changed (~10 min of model time)
-  if (f && (Math.abs(t - lastDraw.t) >= 10 * 60_000 || lastDraw.layer !== layer || lastDraw.source !== sourceKey || Number.isNaN(lastDraw.t))) {
+function drawField(f: Field[], t: number) {
+  // redraw the colours only when something visible changed: ~10 min of model time, other
+  // frames or tiles arrived, another layer, or the canvas moved with the map
+  const key = f.map((x) => x.src).join(';');
+  if (f.length && (Math.abs(t - lastDraw.t) >= 10 * 60_000 || lastDraw.layer !== layer || lastDraw.key !== key || Number.isNaN(lastDraw.t))) {
     field.draw(f, layer);
-    lastDraw = { t, layer, source: sourceKey };
+    lastDraw = { t, layer, key };
   }
 }
 
 function render() {
-  const t = timeline.t, store = stores[sourceKey];
+  const t = timeline.t;
+  if (field.fit()) { lastDraw.t = NaN; schedulePrefetch(t); }
+  const box = field.extent;
   const fade = nowcastFade(t);
   const past = t < nowT && fade === null;
-  let f: Field | null;
+  let f: Field[];
   if (fade !== null) {
     sat.hide();
     nowcast.prepare(sat.radarList());
     nowcast.show((t - sat.latestRadar()!) / 60_000, fade);
-    f = store.at(t);
+    f = weather.fields(t, box);
     // the forecast underneath shows through as the nowcast fades (or alone until it's ready)
     const ncShown = nowcast.ready;
     field.setVisible(!ncShown || fade < 1);
@@ -261,22 +255,25 @@ function render() {
   } else if (past) {
     nowcast.hide();
     sat.show(t, layer === 'rain');
-    field.setVisible(false);
-    f = store.at(nowT);
-    setTheme(sat.mode === 'radar' ? 'grey' : 'dark');
+    f = weather.fields(nowT, box);
+    // nothing observed here (no satellite covers it, no radar): show the forecast for now instead
+    const none = sat.mode === 'none';
+    field.setVisible(none);
+    if (none) { field.setOpacity(1); drawField(f, nowT); }
+    setTheme(sat.mode === 'radar' || (none && layer === 'rain') ? 'grey' : 'dark');
     particles.setAlpha(0); // observed pictures: no model wind lines on top
   } else {
     nowcast.hide();
     sat.hide();
     field.setVisible(true);
     field.setOpacity(1);
-    f = store.at(t);
+    f = weather.fields(t, box);
     setTheme(layer === 'rain' ? 'grey' : 'dark');
     particles.setAlpha(WIND_ALPHA[layer]);
     drawField(f, t);
   }
   $('#app-loading')?.remove();
-  particles.setField(f);
+  particles.setFields(f);
   updateLegend(past);
   updatePickerValue(f, past);
 }
@@ -299,11 +296,12 @@ function buildLayerButtons() {
 let legendKey = '';
 function updateLegend(past: boolean) {
   const radar = past && sat.mode === 'radar';
-  const key = past ? (radar ? 'radar' : 'sat') : layer;
+  const satPic = past && (sat.mode === 'sat' || sat.mode === 'sat+radar');
+  const key = radar ? 'radar' : satPic ? 'sat' : layer;
   if (key === legendKey) return;
   legendKey = key;
   const el = $('#legend');
-  if (past && !radar) {
+  if (satPic) {
     el.innerHTML = `<span class="lg-title">ดาวเทียม</span><div class="lg-bar" style="background:linear-gradient(90deg, rgba(210,210,215,0.1), rgba(225,225,230,0.55), #f4f6fa), #1b2029"><span style="left:8%">เมฆต่ำ</span><span style="left:90%">พายุ</span></div>`;
     return;
   }
@@ -337,15 +335,15 @@ function flipPicker() {
   $('#picker').classList.toggle('flip', x > map.getContainer().clientWidth - 190);
 }
 
-function updatePickerValue(f: Field | null, past: boolean) {
-  if (!picked || !f) return;
-  const g = f.g, { lat, lon } = picked;
+function updatePickerValue(f: Field[], past: boolean) {
+  if (!picked || !f.length) return;
+  const { lat, lon } = picked;
   const lbl = $('#picker .picker-label');
   if (past) { lbl.innerHTML = 'ดูภาพเมฆจริง <b>›</b>'; return; }
-  const p = sample(g, f.p, lon, lat);
-  if (Number.isNaN(p)) { lbl.innerHTML = 'นอกพื้นที่ <b>›</b>'; return; }
-  const t = sample(g, f.t, lon, lat), c = sample(g, f.c, lon, lat);
-  const ws = Math.hypot(sample(g, f.u, lon, lat), sample(g, f.v, lon, lat)) * 3.6;
+  const p = sampleAt(f, 'p', lon, lat);
+  if (Number.isNaN(p)) { lbl.innerHTML = 'แตะเพื่อดูพยากรณ์ <b>›</b>'; return; }
+  const t = sampleAt(f, 't', lon, lat), c = sampleAt(f, 'c', lon, lat);
+  const ws = Math.hypot(sampleAt(f, 'u', lon, lat), sampleAt(f, 'v', lon, lat)) * 3.6;
   const main = layer === 'rain' ? `${p < 0.1 ? 'ไม่มีฝน' : p.toFixed(1) + ' มม./ชม.'}`
     : layer === 'clouds' ? `เมฆ ${Math.round(c)}%`
     : layer === 'wind' ? `ลม ${Math.round(ws)} กม./ชม.`

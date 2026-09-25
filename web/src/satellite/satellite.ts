@@ -1,5 +1,7 @@
 // Observed weather for the past slice of the timeline:
-//  - Himawari-9 infrared from NASA GIBS (every 10 min, ~30-40 min behind)
+//  - geostationary infrared from NASA GIBS (every 10 min, ~30-40 min behind): Himawari over
+//    Asia/Pacific, GOES-West and GOES-East over the Americas. GIBS has no Meteosat, so Europe,
+//    Africa and the Middle East have no live cloud picture (the forecast is shown there instead).
 //  - RainViewer radar composite (free tier: last 2 h, 10 min steps, zoom <= 7)
 import type { Map as MLMap } from 'maplibre-gl';
 import { HOUR } from '../util/time';
@@ -77,12 +79,19 @@ class TimedRaster {
   }
 }
 
-const GIBS = 'Himawari_AHI_Band13_Clean_Infrared';
+// satellite, the longitude it hangs over, and its credit; used within ~65° of it
+const GEO = [
+  { id: 'Himawari_AHI_Band13_Clean_Infrared', lon: 140.7, credit: 'NASA GIBS / JMA Himawari' },
+  { id: 'GOES-West_ABI_Band13_Clean_Infrared', lon: -137.2, credit: 'NASA GIBS / NOAA GOES' },
+  { id: 'GOES-East_ABI_Band13_Clean_Infrared', lon: -75.2, credit: 'NASA GIBS / NOAA GOES' },
+];
+const GEO_REACH = 65;
 const SAT_STEP = HOUR / 2;   // one image per half hour keeps downloads small
 const SAT_LAG = 50 * MIN;    // newest image we trust to exist
 
 export class Satellite {
-  private sat: TimedRaster;
+  private sats = new Map<number, TimedRaster>();
+  private current: number | null = null;
   private radar: TimedRaster;
   private radarFrames: { t: number; path: string }[] = [];
   private radarHost = '';
@@ -90,12 +99,7 @@ export class Satellite {
   /** called once the list of radar pictures has arrived */
   onRadarReady: () => void = () => {};
 
-  constructor(map: MLMap, beforeId?: string) {
-    this.sat = new TimedRaster(map, 'sat-', beforeId, {
-      // repainted as white cloud on the dark map (sat-colors.ts)
-      url: (t) => `${SAT_PROTOCOL}://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${GIBS}/default/${new Date(t).toISOString().slice(0, 19)}Z/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png`,
-      maxzoom: 6, opacity: 1, attribution: 'NASA GIBS / JMA Himawari', keep: 6,
-    });
+  constructor(private map: MLMap, private beforeId?: string) {
     registerSatelliteProtocol();
     this.radar = new TimedRaster(map, 'radar-', beforeId, {
       // unsmoothed tiles keep exact palette colours, so they can be repainted (radar-colors.ts)
@@ -132,21 +136,53 @@ export class Satellite {
     return best;
   }
 
-  /** What the past view is showing right now, for the legend. */
-  mode: 'radar' | 'sat' | 'sat+radar' = 'sat';
+  /** Which satellite sees the middle of the map (null: none — Europe, Africa, Middle East). */
+  private geoFor(): number | null {
+    const c = this.map.getCenter().wrap().lng;
+    let best: number | null = null, bestD = GEO_REACH;
+    GEO.forEach((g, i) => {
+      const d = Math.abs(((c - g.lon + 540) % 360) - 180);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+
+  /** Is there a live cloud picture for the area in view? */
+  hasSat() { return this.geoFor() !== null; }
+
+  private satFor(i: number) {
+    let r = this.sats.get(i);
+    if (!r) {
+      const id = GEO[i].id;
+      r = new TimedRaster(this.map, `sat${i}-`, this.beforeId, {
+        // repainted as white cloud on the dark map (sat-colors.ts)
+        url: (t) => `${SAT_PROTOCOL}://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${id}/default/${new Date(t).toISOString().slice(0, 19)}Z/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png`,
+        maxzoom: 6, opacity: 1, attribution: GEO[i].credit, keep: 6,
+      });
+      this.sats.set(i, r);
+    }
+    return r;
+  }
+
+  /** What the past view is showing right now, for the legend ('none': nothing observed here). */
+  mode: 'radar' | 'sat' | 'sat+radar' | 'none' = 'sat';
 
   /** radarOnly: on the rain layer, show clean radar on its own (like Windy) wherever it exists. */
   show(t: number, radarOnly = false) {
     const r = this.radarFor(t);
-    if (radarOnly && r !== null) {
-      this.sat.hide();
+    const geo = this.geoFor();
+    if (this.current !== null && this.current !== geo) this.sats.get(this.current)?.hide();
+    this.current = geo;
+    if ((radarOnly || geo === null) && r !== null) {
+      if (geo !== null) this.satFor(geo).hide();
       this.radar.show(r);
       this.mode = 'radar';
       return;
     }
-    this.sat.show(this.frameFor(t));
+    if (geo === null) { this.radar.hide(); this.mode = 'none'; return; }
+    this.satFor(geo).show(this.frameFor(t));
     if (r === null) { this.radar.hide(); this.mode = 'sat'; } else { this.radar.show(r); this.radar.raise(); this.mode = 'sat+radar'; }
   }
 
-  hide() { this.sat.hide(); this.radar.hide(); }
+  hide() { for (const s of this.sats.values()) s.hide(); this.radar.hide(); }
 }

@@ -1,15 +1,21 @@
-// Paints the active weather layer into a canvas laid out in Web-Mercator,
-// then hands it to MapLibre as a canvas source under the borders and labels.
+// Paints the active weather layer into a canvas laid out in Web-Mercator over the part of the
+// world being looked at (plus a margin), then hands it to MapLibre as a canvas source under the
+// borders and labels. Several forecasts can be drawn together: the coarse world one first, and a
+// fine regional one on top that fades out towards its own edges.
 import type { Map as MLMap, CanvasSource } from 'maplibre-gl';
-import type { Field, Grid } from '../data/store';
+import type { Box, Field, Grid } from '../data/store';
 import { RAMPS, cachedLut, lutIndex, type LayerKey } from './palettes';
 
 // Forecast rain below this rate is hidden (fades in over RAIN_FADE): models spread a thin
 // drizzle haze over whole regions, which buries the real rain cells. Tapping still reads it.
 const RAIN_MIN = 0.35, RAIN_FADE = 0.3; // mm/h
+const MAX_LAT = 85;
+const CANVAS_W = 720;   // px; about 0.05° per pixel over Thailand, one pixel per half degree for the world
+const CANVAS_H_MAX = 1100;
 
 const merc = (lat: number) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
 const unmerc = (y: number) => (360 / Math.PI) * Math.atan(Math.exp(y)) - 90;
+const clampLat = (l: number) => Math.max(-MAX_LAT, Math.min(MAX_LAT, l));
 
 /** Catmull-Rom taps for fractional positions: 4 clamped indices + 4 weights each. */
 function cubicTaps(pos: Float32Array, n: number) {
@@ -25,50 +31,35 @@ function cubicTaps(pos: Float32Array, n: number) {
   return { idx, wt };
 }
 
+/** Everything that depends on one grid under the current canvas. */
+interface Taps {
+  colT: { idx: Int32Array; wt: Float32Array };
+  rowT: { idx: Int32Array; wt: Float32Array };
+  pass: Float32Array;   // grid rows x canvas columns
+  weight: Float32Array; // how much this grid counts at each canvas pixel (0..1)
+  up: Float32Array;     // resampled value
+  upRain: Float32Array; // resampled rain (for rain seen through the cloud layer)
+  scalar: Float32Array; // grid-sized scratch
+}
+
 export class FieldLayer {
   readonly canvas = document.createElement('canvas');
   private ctx: CanvasRenderingContext2D;
-  private img: ImageData;
-  private edge: Float32Array; // soft fade at the region border, per canvas pixel
-  private lats: Float32Array;  // latitude of each canvas row
-  private lons: Float32Array;  // longitude of each canvas column
-  // resampling taps for the grid currently in use (sources can differ: 9 km vs 25 km)
-  private g!: Grid;
-  private colT!: { idx: Int32Array; wt: Float32Array };
-  private rowT!: { idx: Int32Array; wt: Float32Array };
-  private scalar!: Float32Array;
-  private pass!: Float32Array;  // grid rows x canvas columns
-  private up: Float32Array;    // canvas-sized, the active value
-  private upRain: Float32Array; // canvas-sized, rain under the cloud layer
+  private img!: ImageData;
+  private W = 0; private H = 0;
+  private lats = new Float32Array(0);  // latitude of each canvas row
+  private lons = new Float32Array(0);  // longitude of each canvas column
+  private box: Box = { w: 0, s: 0, e: 0, n: 0 };
+  private taps = new Map<Grid, Taps>();
+  private val = new Float32Array(0);
+  private valRain = new Float32Array(0);
+  private cover = new Float32Array(0);
   private source?: CanvasSource;
 
-  /** `area` fixes the painted region; every source grid must cover the same area. */
-  constructor(private map: MLMap, area: Grid, beforeId?: string) {
-    const lon0 = area.lon0, lat0 = area.lat0;
-    const lonE = area.lon0 + area.dlon * (area.w - 1), latS = area.lat0 + area.dlat * (area.h - 1);
-    const W = 680; // fixed canvas: about 0.05 deg per pixel, sharp enough for 9 km data
-    const H = Math.round((W * (merc(lat0) - merc(latS))) / (((lonE - lon0) * Math.PI) / 180));
-    this.canvas.width = W; this.canvas.height = H;
+  constructor(private map: MLMap, beforeId?: string) {
     this.ctx = this.canvas.getContext('2d')!;
-    this.img = this.ctx.createImageData(W, H);
-    this.lats = new Float32Array(H); this.lons = new Float32Array(W);
-    const yTop = merc(lat0), yBot = merc(latS);
-    for (let r = 0; r < H; r++) this.lats[r] = unmerc(yTop + ((r + 0.5) / H) * (yBot - yTop));
-    for (let c = 0; c < W; c++) this.lons[c] = lon0 + ((c + 0.5) / W) * (lonE - lon0);
-    const fade = 1.5; // degrees
-    this.edge = new Float32Array(W * H);
-    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
-      const d = Math.min(lat0 - this.lats[r], this.lats[r] - latS, this.lons[c] - lon0, lonE - this.lons[c]);
-      const s = Math.min(1, Math.max(0, d / fade));
-      this.edge[r * W + c] = s * s * (3 - 2 * s);
-    }
-    this.up = new Float32Array(W * H);
-    this.upRain = new Float32Array(W * H);
-
-    map.addSource('field', {
-      type: 'canvas', canvas: this.canvas, animate: false,
-      coordinates: [[lon0, lat0], [lonE, lat0], [lonE, latS], [lon0, latS]],
-    });
+    this.canvas.width = this.canvas.height = 1;
+    map.addSource('field', { type: 'canvas', canvas: this.canvas, animate: false, coordinates: [[0, 1], [1, 1], [1, 0], [0, 0]] });
     map.addLayer({
       id: 'field', type: 'raster', source: 'field',
       paint: { 'raster-fade-duration': 0, 'raster-resampling': 'linear' },
@@ -76,21 +67,76 @@ export class FieldLayer {
     this.source = map.getSource('field') as CanvasSource;
   }
 
-  private useGrid(g: Grid) {
-    if (this.g === g) return;
-    this.g = g;
+  /** The area the canvas covers (what the forecasts must supply). */
+  get extent(): Box { return this.box; }
+
+  /**
+   * Make the canvas cover the map view, with a margin so small pans don't need a redraw.
+   * Returns true when the canvas moved (everything must be drawn again).
+   */
+  fit(): boolean {
+    const b = this.map.getBounds();
+    const vw = b.getWest(), ve = b.getEast(), vn = clampLat(b.getNorth()), vs = clampLat(b.getSouth());
+    const spanX = ve - vw, spanY = merc(vn) - merc(vs);
+    const cur = this.box, curY = merc(cur.n) - merc(cur.s);
+    const covers = vw >= cur.w && ve <= cur.e && vn <= cur.n && vs >= cur.s;
+    // redo when the view left the canvas, or zoomed so far that the canvas is too coarse/wasteful
+    const scale = (cur.e - cur.w) / Math.max(1e-6, spanX);
+    if (covers && scale < 2.6 && scale > 1.2 && curY / Math.max(1e-6, spanY) < 2.6) return false;
+
+    const mx = spanX * 0.4, my = spanY * 0.4;
+    let w = vw - mx, e = ve + mx;
+    if (e - w > 360) { const c = (vw + ve) / 2; w = c - 180; e = c + 180; }
+    const n = clampLat(unmerc(merc(vn) + my)), s = clampLat(unmerc(merc(vs) - my));
+    this.box = { w, s, e, n };
+
+    let W = CANVAS_W, H = Math.round((W * (merc(n) - merc(s))) / (((e - w) * Math.PI) / 180));
+    if (H > CANVAS_H_MAX) { W = Math.max(64, Math.round((W * CANVAS_H_MAX) / H)); H = CANVAS_H_MAX; }
+    H = Math.max(16, H);
+    this.W = W; this.H = H;
+    this.canvas.width = W; this.canvas.height = H;
+    this.img = this.ctx.createImageData(W, H);
+    this.lats = new Float32Array(H); this.lons = new Float32Array(W);
+    const yTop = merc(n), yBot = merc(s);
+    for (let r = 0; r < H; r++) this.lats[r] = unmerc(yTop + ((r + 0.5) / H) * (yBot - yTop));
+    for (let c = 0; c < W; c++) this.lons[c] = w + ((c + 0.5) / W) * (e - w);
+    this.val = new Float32Array(W * H); this.valRain = new Float32Array(W * H); this.cover = new Float32Array(W * H);
+    this.taps.clear();
+    this.source!.setCoordinates([[w, n], [e, n], [e, s], [w, s]]);
+    return true;
+  }
+
+  private tapsFor(f: Field): Taps {
+    let t = this.taps.get(f.g);
+    if (t) return t;
+    const g = f.g, W = this.W, H = this.H;
+    // a world grid is one copy of the globe: shift canvas longitudes onto it
+    const shift = (lo: number) => { if (f.feather > 0) return lo; let x = lo; while (x < g.lon0) x += 360; while (x >= g.lon0 + 360) x -= 360; return x; };
+    const cols = Float32Array.from(this.lons, (lo) => (shift(lo) - g.lon0) / g.dlon);
     const rows = Float32Array.from(this.lats, (la) => (la - g.lat0) / g.dlat);
-    const cols = Float32Array.from(this.lons, (lo) => (lo - g.lon0) / g.dlon);
-    this.colT = cubicTaps(cols, g.w);
-    this.rowT = cubicTaps(rows, g.h);
-    this.scalar = new Float32Array(g.w * g.h);
-    this.pass = new Float32Array(g.h * this.canvas.width);
+    const weight = new Float32Array(W * H);
+    const latN = g.lat0, latS = g.lat0 + g.dlat * (g.h - 1), lonW = g.lon0, lonE = g.lon0 + g.dlon * (g.w - 1);
+    for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+      const la = this.lats[r], lo = shift(this.lons[c]);
+      const d = Math.min(latN - la, la - latS, lo - lonW, lonE - lo);
+      let s: number;
+      if (f.feather > 0) { s = Math.min(1, Math.max(0, d / f.feather)); s = s * s * (3 - 2 * s); }
+      else s = d >= -0.5 ? 1 : 0; // (tile sets can stop just short of the canvas edge)
+      weight[r * W + c] = s;
+    }
+    t = {
+      colT: cubicTaps(cols, g.w), rowT: cubicTaps(rows, g.h), pass: new Float32Array(g.h * W), weight,
+      up: new Float32Array(W * H), upRain: new Float32Array(W * H), scalar: new Float32Array(g.w * g.h),
+    };
+    if (this.taps.size > 6) this.taps.clear(); // old tile sets
+    this.taps.set(f.g, t);
+    return t;
   }
 
   /** Smooth (bicubic) resample of a grid array onto the canvas, in two separable passes. */
-  private upsample(src: Float32Array, dst: Float32Array, floor0: boolean) {
-    const { w, h } = this.g, W = this.canvas.width, H = this.canvas.height;
-    const { idx: ci, wt: cw } = this.colT, { idx: ri, wt: rw } = this.rowT, pass = this.pass;
+  private upsample(g: Grid, t: Taps, src: Float32Array, dst: Float32Array, floor0: boolean) {
+    const { w, h } = g, W = this.W, H = this.H;
+    const { idx: ci, wt: cw } = t.colT, { idx: ri, wt: rw } = t.rowT, pass = t.pass;
     for (let y = 0; y < h; y++) {
       const row = y * w, out = y * W;
       for (let c = 0, k = 0; c < W; c++, k += 4) {
@@ -119,26 +165,40 @@ export class FieldLayer {
     this.map.setLayoutProperty('field', 'visibility', on ? 'visible' : 'none');
   }
 
-  draw(f: Field, layer: LayerKey) {
-    this.useGrid(f.g);
-    const g = this.g, n = g.w * g.h, s = this.scalar;
-    if (layer === 'wind') for (let i = 0; i < n; i++) s[i] = Math.hypot(f.u[i], f.v[i]) * 3.6;
-    else if (layer === 'temp') s.set(f.t);
-    else if (layer === 'rain') s.set(f.p);
-    else s.set(f.c);
-    this.upsample(s, this.up, layer !== 'temp');
-    if (layer === 'clouds') this.upsample(f.p, this.upRain, true);
+  /** Draw the fields (coarse first, finer on top) for one layer. */
+  draw(fields: Field[], layer: LayerKey) {
+    if (!this.W) return;
+    const N = this.W * this.H, val = this.val, valRain = this.valRain, cover = this.cover;
+    val.fill(0); valRain.fill(0); cover.fill(0);
+    for (const f of fields) {
+      const t = this.tapsFor(f), g = f.g, n = g.w * g.h, s = t.scalar;
+      if (layer === 'wind') for (let i = 0; i < n; i++) s[i] = Math.hypot(f.u[i], f.v[i]) * 3.6;
+      else if (layer === 'temp') s.set(f.t);
+      else if (layer === 'rain') s.set(f.p);
+      else s.set(f.c);
+      this.upsample(g, t, s, t.up, layer !== 'temp');
+      if (layer === 'clouds') this.upsample(g, t, f.p, t.upRain, true);
+      const wt = t.weight, up = t.up, ur = t.upRain;
+      for (let i = 0; i < N; i++) {
+        const w = wt[i];
+        if (w <= 0) continue;
+        val[i] = val[i] * (1 - w) + up[i] * w;
+        if (layer === 'clouds') valRain[i] = valRain[i] * (1 - w) + ur[i] * w;
+        cover[i] = cover[i] + w * (1 - cover[i]);
+      }
+    }
 
-    const out = this.img.data, up = this.up, upRain = this.upRain, edge = this.edge;
+    const out = this.img.data;
     const ramp = RAMPS[layer], lut = cachedLut(ramp);
     const rainRamp = RAMPS.rain, rainLut = cachedLut(rainRamp);
-    for (let i = 0, o = 0; i < up.length; i++, o += 4) {
-      let k = lutIndex(ramp, up[i]);
+    for (let i = 0, o = 0; i < N; i++, o += 4) {
+      if (cover[i] <= 0) { out[o + 3] = 0; continue; }
+      let k = lutIndex(ramp, val[i]);
       let R = lut[k], G = lut[k + 1], B = lut[k + 2], A = lut[k + 3];
-      if (layer === 'rain') A *= Math.min(1, Math.max(0, (up[i] - RAIN_MIN) / RAIN_FADE));
+      if (layer === 'rain') A *= Math.min(1, Math.max(0, (val[i] - RAIN_MIN) / RAIN_FADE));
       if (layer === 'clouds') {
         // rain shows through the cloud deck, as on Windy's cloud layer
-        const pv = upRain[i];
+        const pv = valRain[i];
         if (pv > RAIN_MIN + RAIN_FADE / 2) {
           k = lutIndex(rainRamp, pv);
           // straight-alpha "rain over cloud": weight the cloud's own RGB by its own
@@ -153,7 +213,7 @@ export class FieldLayer {
           A = outA * 255;
         }
       }
-      out[o] = R; out[o + 1] = G; out[o + 2] = B; out[o + 3] = A * edge[i];
+      out[o] = R; out[o + 1] = G; out[o + 2] = B; out[o + 3] = A * cover[i];
     }
     this.ctx.putImageData(this.img, 0, 0);
     // copy the canvas to the GPU once, then stop

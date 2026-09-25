@@ -1,6 +1,6 @@
 """Fetch every source, write PNG frames + manifest.json.
 
-usage: python render.py [--out DIR] [--max-steps N] [--only ecmwf]
+usage: python render.py [--out DIR] [--max-steps N] [--only ecmwf|world]
 """
 import argparse
 import datetime as dt
@@ -12,6 +12,7 @@ import traceback
 from common import ENC, grid_info, pack_png, write_atomic
 import fetch_ecmwf
 import fetch_ecmwf9
+import fetch_world
 
 # Each source lists fetchers in order of preference; the first that works wins.
 # ECMWF: native 9 km (Open-Meteo archive), falling back to ECMWF's own 25 km open data.
@@ -41,7 +42,7 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap.add_argument("--out", default=os.path.join(here, "..", "web", "public", "data"))
     ap.add_argument("--max-steps", type=int, default=None)
-    ap.add_argument("--only", choices=list(SOURCES))
+    ap.add_argument("--only", choices=list(SOURCES) + ["world"])
     a = ap.parse_args()
     out = os.path.abspath(a.out)
 
@@ -67,10 +68,25 @@ def main():
                                     "run": iso(run), "grid": grid, "frames": items}
         print(f"{key}: {len(items)} frames")
 
+    # the whole world at 25 km, in tiles (the phone loads only what it's looking at)
+    if not a.only or a.only == "world":
+        try:
+            run, frames = fetch_world.fetch_and_write(out, a.max_steps)
+            fetch_world.check(out, frames)
+            manifest["sources"]["world"] = {
+                "label": "ทั่วโลก", "credit": "ECMWF", "run": iso(run), "grid": fetch_world.grid_info(),
+                "tile": fetch_world.TILE, "frames": [{"t": iso(f["t"]), "f": f["f"]} for f in frames]}
+            print(f"world: {len(frames)} steps")
+        except Exception:
+            traceback.print_exc()
+            print("!! world failed, skipping", file=sys.stderr)
+
     if not manifest["sources"]:
         sys.exit("no source succeeded")
     # check: every referenced file exists before publishing the manifest
     for s in manifest["sources"].values():
+        if "tile" in s:
+            continue  # checked by fetch_world.check
         for fr in s["frames"]:
             assert os.path.exists(os.path.join(out, fr["f"])), fr["f"]
     write_atomic(os.path.join(out, "manifest.json"),

@@ -85,7 +85,7 @@ export function forecastUrl(lat: number, lon: number) {
       'wind_speed_500hPa', 'wind_direction_500hPa'].join(','),
     // 9 km for rain; its open data has no upper-air wind, the 25 km run does
     models: 'ecmwf_ifs,ecmwf_ifs025', forecast_hours: String(LATER_HOURS + 2), past_hours: '1',
-    timeformat: 'unixtime', wind_speed_unit: 'kmh',
+    timeformat: 'unixtime', wind_speed_unit: 'kmh', timezone: 'auto', // (for the local clock abroad)
   });
   return 'https://api.open-meteo.com/v1/forecast?' + q;
 }
@@ -95,6 +95,7 @@ export interface Forecast {
   precip: (number | null)[];      // mm in that hour
   prob: (number | null)[];        // %
   u: number[]; v: number[];       // steering wind, km/h towards east / north
+  tz: number;                     // the spot's offset from UTC, seconds
 }
 
 export function parseForecast(j: any): Forecast {
@@ -115,7 +116,7 @@ export function parseForecast(j: any): Forecast {
     }
     u.push(sw ? su / sw : 0); v.push(sw ? sv / sw : 0);
   }
-  return { time, precip: col('precipitation'), prob: col('precipitation_probability'), u, v };
+  return { time, precip: col('precipitation'), prob: col('precipitation_probability'), u, v, tz: Number(j.utc_offset_seconds ?? 7 * 3600) };
 }
 
 /** Steering wind at time t (nearest hour). */
@@ -136,12 +137,17 @@ export interface RainAlert {
   prob?: number;        // later: model's chance of rain, %
   at?: number;          // later: start of that hour, ms
   radarT?: number;      // time of the radar picture used
+  tz?: number;          // the spot's offset from UTC, seconds (local clock times, quiet hours)
 }
 
 const wet = (s: PathSample) => s.frac >= WET_FRAC;
 const round5 = (m: number) => Math.max(5, Math.round(m / 5) * 5);
 
 export function decide(path: PathSample[] | null, radarT: number | null, now: number, fc: Forecast | null): RainAlert {
+  return { ...verdict(path, radarT, now, fc), tz: fc?.tz };
+}
+
+function verdict(path: PathSample[] | null, radarT: number | null, now: number, fc: Forecast | null): RainAlert {
   let laterFrom = now;
   if (path && radarT != null && now - radarT <= STALE * 60_000) {
     const age = (now - radarT) / 60_000;
@@ -181,7 +187,11 @@ export function decide(path: PathSample[] | null, radarT: number | null, now: nu
 
 // ---------- words ----------
 
-const clock = new Intl.DateTimeFormat('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Bangkok' });
+// clock time at the spot (Thailand unless the forecast said otherwise)
+const hhmm = new Intl.DateTimeFormat('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+const clock = (t: number, tz = 7 * 3600) => hhmm.format(t + tz * 1000);
+/** Hour of day (0-23) at the spot. */
+export const localHour = (t: number, tz = 7 * 3600) => new Date(t + tz * 1000).getUTCHours();
 
 export function duration(min: number) {
   if (min < 60) return `${Math.max(5, Math.round(min / 5) * 5)} นาที`;
@@ -201,7 +211,7 @@ export function alertText(a: RainAlert): { title: string; body: string } {
     case 'later':
       if (a.inMin! < 15) return { title: `ชั่วโมงนี้อาจมี${lv}`,
         body: `${a.prob != null ? `โอกาส ${a.prob}% ` : ''}(จากแบบจำลอง เรดาร์ยังไม่เห็นกลุ่มฝน)` };
-      return { title: `ราว ${clock.format(a.at!)} น. อาจมี${lv}`,
+      return { title: `ราว ${clock(a.at!, a.tz)} น. อาจมี${lv}`,
         body: `อีก ~${duration(a.inMin!)}${a.prob != null ? ` · โอกาส ${a.prob}%` : ''} (จากแบบจำลอง)` };
     default:
       return { title: `${LATER_HOURS} ชม. นี้ไม่น่ามีฝน`, body: '' };
